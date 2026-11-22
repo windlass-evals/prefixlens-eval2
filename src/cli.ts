@@ -15,6 +15,7 @@ import { cataloguePath, loadCatalogue, parseProviderMapping } from "./catalogue.
 import { loadPricing } from "./pricing.ts"
 import { printable } from "./printable.ts"
 import { renderCheck, renderCheckJson } from "./report/check.ts"
+import { compareTraces, comparisonSide, renderComparison, renderComparisonJson } from "./report/compare.ts"
 import { renderHtml } from "./report/html.ts"
 import { renderJson } from "./report/json.ts"
 import { renderTerminal } from "./report/terminal.ts"
@@ -27,6 +28,7 @@ const HELP = `prefixlens ${VERSION}: explains prompt-cache hits and misses
 Usage:
   prefixlens import <adapter> <path> [options]   convert harness logs to a trace (JSONL)
   prefixlens report <trace.jsonl|-> [options]    report hit rates, costs and miss causes
+  prefixlens compare <before> <after> [options]  compare calls, prompt tokens, cache-read share and lost tokens
   prefixlens check <trace.jsonl|-> [options]     exit 1 when the harness broke its own cache (for CI)
   prefixlens check --requests <file|-> [options] exit 1 when a request body does not keep the prefix
                                                  of the one before it (bodies your tests captured)
@@ -65,6 +67,11 @@ report options:
   --all                 show every row and every miss in the terminal report
   --no-color            plain terminal output (also honours NO_COLOR)
 
+compare options:
+  --json                print both traces' totals and their deltas (after minus before) as JSON
+  --pricing, --no-catalogue, --catalogue-provider   as for report
+  Either trace can be - for stdin, but not both.
+
 check options:
   --fail-on <classes>   also fail on these, comma-separated: unexplained, intentional, expiry,
                         provider-side, cold-start, warm-start (default: avoidable misses and
@@ -101,6 +108,7 @@ Examples:
   prefixlens import claude-code ~/.claude/projects/-my-project/<session-id>.jsonl -o session.trace.jsonl
   prefixlens import opencode ~/.local/share/opencode/opencode.db --list
   prefixlens report session.trace.jsonl --html
+  prefixlens compare before.trace.jsonl after.trace.jsonl --json
   prefixlens check run.trace.jsonl --fail-on expiry           # in CI, after a recorded run
   prefixlens check --requests bodies.jsonl --allow-break-at 7=compaction   # bodies a test wrote
   prefixlens record --provider anthropic -o run.trace.jsonl   # then ANTHROPIC_BASE_URL=http://127.0.0.1:8787
@@ -132,6 +140,7 @@ export async function main(argv: string[]): Promise<number> {
   if (command === "adapters") return listAdapters()
   if (command === "import") return runImport(positionals.slice(1), flags)
   if (command === "report") return runReport(positionals.slice(1), flags)
+  if (command === "compare") return runCompare(positionals.slice(1), flags)
   if (command === "check") return runCheck(positionals.slice(1), flags)
   if (command === "record") return runRecord(flags)
   if (command === "pricing") {
@@ -258,6 +267,28 @@ async function runReport(args: string[], flags: Flags): Promise<number> {
   return 0
 }
 
+async function runCompare(args: string[], flags: Flags): Promise<number> {
+  const [before, after] = args
+  if (!before || !after || args.length !== 2) return fail("usage: prefixlens compare <before> <after> [--json]")
+  if (before === "-" && after === "-") return fail("compare can read only one trace from stdin")
+  const unsupported = Object.keys(flags).find((name) => !["json", "pricing", "no-catalogue", "catalogue-provider", "no-color"].includes(name))
+  if (unsupported) return fail(`--${unsupported} does not apply to compare`)
+  const load = async (input: string, side: "before" | "after") => {
+    const label = `${side} (${input === "-" ? "stdin" : input}): `
+    const loaded = await loadAnalysis(input, flags, label)
+    if (typeof loaded === "string") return printable(`${side}: ${loaded}`)
+    for (const warning of loaded.analysis.warnings.slice(0, 10)) console.error(printable(`warning: ${label}${warning}`))
+    return comparisonSide(input, loaded.analysis)
+  }
+  const first = await load(before, "before")
+  if (typeof first === "string") return fail(first)
+  const second = await load(after, "after")
+  if (typeof second === "string") return fail(second)
+  const comparison = compareTraces(first, second)
+  process.stdout.write(flags.json ? renderComparisonJson(comparison) : renderComparison(comparison))
+  return 0
+}
+
 // The CI gate: the report's analysis, sorted into classes, with an exit code. 2 means the check could not be made.
 async function runCheck(args: string[], flags: Flags): Promise<number> {
   const [input] = args
@@ -315,7 +346,7 @@ async function runRequestsCheck(input: string, flags: Flags): Promise<number> {
 }
 
 /** Reads a trace and analyzes it with the pricing the flags name. Returns a message when it cannot. */
-async function loadAnalysis(input: string, flags: Flags) {
+async function loadAnalysis(input: string, flags: Flags, diagnosticPrefix = "") {
   const text = input === "-" ? await streamText(process.stdin) : await readFile(expandHome(input))
   if (text === undefined) return `cannot read ${input}`
   const name = input === "-" ? "stdin" : input
@@ -323,8 +354,8 @@ async function loadAnalysis(input: string, flags: Flags) {
   const parsed = parseTrace(text)
   if (parsed.records.length === 0 && !looksLikeTrace(text))
     return `${name} is not a prefixlens trace (no line has "v": 1); convert harness logs first with prefixlens import <adapter> <path>`
-  for (const error of parsed.errors.slice(0, 20)) console.error(printable(`error: ${error}`))
-  if (parsed.errors.length > 20) console.error(`error: ... ${parsed.errors.length - 20} more`)
+  for (const error of parsed.errors.slice(0, 20)) console.error(printable(`error: ${diagnosticPrefix}${error}`))
+  if (parsed.errors.length > 20) console.error(printable(`error: ${diagnosticPrefix}... ${parsed.errors.length - 20} more`))
   if (parsed.records.length === 0) return parsed.errors.length > 0 ? "no valid trace records" : "the trace has no records (the import found no model calls with usage)"
   const pricingPath = typeof flags.pricing === "string" ? flags.pricing : undefined
   const pricing = await loadPricing(pricingPath)

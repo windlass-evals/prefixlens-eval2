@@ -4,6 +4,10 @@ All notable changes to prefixlens are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- **`prefixlens compare <before> <after>`** shows both traces' call counts, prompt tokens, cache-read shares and lost tokens, plus the change from before to after. Use `--json` for benchmark output.
+
 ## [0.7.0] - 2026-11-18
 
 ### Added

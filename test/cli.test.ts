@@ -152,6 +152,75 @@ describe("cli", () => {
   })
 })
 
+describe("cli compare", () => {
+  const call = (second: number, input: number, read: number, write: number, compaction = false) => JSON.stringify({
+    v: 1,
+    ts: new Date(Date.UTC(2026, 10, 18, 0, 0, second)).toISOString(),
+    provider: "anthropic",
+    model: "claude-sonnet-4-5",
+    fidelity: "usage-only",
+    usage: { input_tokens: input, cache_read_tokens: read, cache_write_tokens: write, output_tokens: 100 },
+    ...(compaction ? { hints: [{ kind: "compaction" }] } : {}),
+  }) + "\n"
+  const before = path.join(temp, "before.jsonl")
+  const after = path.join(temp, "after.jsonl")
+
+  test("reports whole-trace totals and after-minus-before deltas as text and JSON", async () => {
+    // Two losses: 500 on a declared compaction and 80 on a call still counted as a hit.
+    await Bun.write(before, call(0, 1000, 0, 2000) + call(10, 0, 1500, 500, true) + call(20, 1080, 1920, 0))
+    await Bun.write(after, call(0, 0, 0, 3000) + call(10, 0, 3000, 0))
+    const terminal = run(["compare", before, after])
+    expect(terminal.code).toBe(0)
+    expect(terminal.stdout).toContain(`Before: ${before}`)
+    expect(terminal.stdout).toMatch(/Calls +3 +2 +-1\n/)
+    expect(terminal.stdout).toMatch(/Prompt tokens +8,000 +6,000 +-2,000\n/)
+    expect(terminal.stdout).toMatch(/Cache-read share +42\.75% +50\.00% +\+7\.25 pp\n/)
+    expect(terminal.stdout).toMatch(/Lost tokens +580 +0 +-580\n/)
+    const json = run(["compare", before, after, "--json"])
+    expect(json.code).toBe(0)
+    expect(json.stderr).toBe("")
+    const result = JSON.parse(json.stdout)
+    expect(result).toMatchObject({
+      compare: "prefixlens",
+      version: 1,
+      before: { trace: before, calls: 3, prompt_tokens: 8000, cache_read_share: 0.4275, lost_tokens: 580 },
+      after: { trace: after, calls: 2, prompt_tokens: 6000, cache_read_share: 0.5, lost_tokens: 0 },
+      delta: { calls: -1, prompt_tokens: -2000, lost_tokens: -580 },
+    })
+    expect(result.delta.cache_read_share_pp).toBeCloseTo(7.25, 12)
+  })
+
+  test("reads one trace from stdin and keeps diagnostics off JSON stdout", async () => {
+    const zero = path.join(temp, "zero-prompt.jsonl")
+    await Bun.write(zero, call(0, 0, 0, 0))
+    const result = run(["compare", zero, "-", "--json"], call(0, 0, 5, 0) + "{truncated\n")
+    expect(result.code).toBe(0)
+    expect(result.stderr).toContain("after (stdin): line 2: not valid JSON")
+    const json = JSON.parse(result.stdout)
+    expect(json.before.cache_read_share).toBe(0)
+    expect(json.after.trace).toBe("-")
+    expect(json.delta).toEqual({ calls: 0, prompt_tokens: 5, cache_read_share_pp: 100, lost_tokens: 0 })
+  })
+
+  test("fails without a comparison for invalid arguments or unusable traces", async () => {
+    const good = path.join(temp, "valid-comparison-input.jsonl")
+    const bad = path.join(temp, "invalid-comparison-input.jsonl")
+    await Bun.write(good, call(0, 0, 0, 0))
+    await Bun.write(bad, '{"v":1}\n')
+    const expectFailure = (args: string[], message: string) => {
+      const result = run(["compare", ...args, "--json"])
+      expect(result.code).toBe(1)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toContain(message)
+    }
+    expectFailure([good], "usage: prefixlens compare <before> <after>")
+    expectFailure([good, good, good], "usage: prefixlens compare <before> <after>")
+    expectFailure(["-", "-"], "only one trace from stdin")
+    expectFailure(["missing.jsonl", good], "before: cannot read missing.jsonl")
+    expectFailure([good, bad], "after: no valid trace records")
+  })
+})
+
 describe("cli record", () => {
   test("records through the proxy until stopped, then the trace reports", async () => {
     const { startFakeUpstream } = await import("./fake-upstream.ts")
