@@ -1,0 +1,10 @@
+node_modules/
+*.trace.jsonl
+*.report.html
+/out/
+.DS_Store
+*.trace.html
+.env
+.env.*
+*.pem
+dist/

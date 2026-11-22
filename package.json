@@ -1,0 +1,75 @@
+{
+  "name": "prefixlens",
+  "version": "0.7.0",
+  "license": "MIT",
+  "author": "Parth",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/parthg1901/prefixlens.git"
+  },
+  "homepage": "https://prefixlens.parthg.dev",
+  "bugs": {
+    "url": "https://github.com/parthg1901/prefixlens/issues"
+  },
+  "description": "Explains prompt-cache hits and misses for any LLM agent, harness or framework: assert prefix stability in CI, record through a local proxy or a wrapped client, and see which request broke the cache, why, and what it cost.",
+  "keywords": [
+    "llm",
+    "prompt-caching",
+    "prompt-cache",
+    "cache",
+    "anthropic",
+    "openai",
+    "ai-agents",
+    "agents",
+    "harness",
+    "observability",
+    "tracing",
+    "cost",
+    "ci",
+    "testing"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "bin": {
+    "prefixlens": "dist/cli.js"
+  },
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./test": {
+      "types": "./dist/test.d.ts",
+      "default": "./dist/test.js"
+    },
+    "./pricing.json": "./pricing.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "pricing.json",
+    "SPEC.md",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "SECURITY.md"
+  ],
+  "engines": {
+    "node": ">=22.0.0",
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "node scripts/build.mjs",
+    "test": "bun test",
+    "test:node": "node scripts/build.mjs && node --test \"test-node/*.test.mjs\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
+    "@types/bun": "^1.4.4",
+    "openai": "^7.55.0",
+    "typescript": "^7.0.2"
+  }
+}

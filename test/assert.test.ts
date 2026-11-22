@@ -1,0 +1,187 @@
+import { describe, expect, test } from "bun:test"
+import { canonicalizeRequest } from "../src/canonical.ts"
+import { assertPrefixStable, explainPrefixDiff, PrefixBreakError } from "../src/assert.ts"
+import { assistant, body, TOOLS, toolResult, toolUse, user } from "./helpers.ts"
+
+// OpenAI Responses bodies, shaped like those of a harness that sends full history every call.
+const fn = (name: string) => ({ type: "function", name, description: `Synthetic ${name}.`, parameters: { type: "object" }, strict: false })
+const responsesTools = ["read_file", "write_file", "run_shell"].map(fn)
+const say = (role: "user" | "developer", text: string) => ({ type: "message", role, content: [{ type: "input_text", text }] })
+const reply = (text: string) => ({ type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text, annotations: [] }] })
+const call = (id: string) => ({ type: "function_call", call_id: id, name: "read_file", arguments: '{"path":"a.txt"}' })
+const output = (id: string, text: string) => ({ type: "function_call_output", call_id: id, output: text })
+const responses = (input: unknown[], extra: Record<string, unknown> = {}) => ({
+  model: "gpt-test-1",
+  store: false,
+  stream: true,
+  instructions: "You are a synthetic coding agent.",
+  tools: responsesTools,
+  tool_choice: "auto",
+  parallel_tool_calls: true,
+  reasoning: { effort: "low", summary: "auto" },
+  prompt_cache_key: "synthetic-session",
+  input,
+  ...extra,
+})
+
+const turn1 = responses([say("user", "Fix the synthetic bug.")])
+const turn2 = responses([say("user", "Fix the synthetic bug."), call("c1"), output("c1", "print(1)"), reply("Fixed.")])
+
+function failure(prev: Record<string, unknown>, next: Record<string, unknown>, options = {}) {
+  try {
+    assertPrefixStable(prev, next, options)
+  } catch (error) {
+    expect(error).toBeInstanceOf(PrefixBreakError)
+    return (error as PrefixBreakError).message
+  }
+  throw new Error("expected assertPrefixStable to throw")
+}
+
+describe("assertPrefixStable", () => {
+  test("an appended turn is stable", () => {
+    const result = assertPrefixStable(turn1, turn2)
+    expect(result).toMatchObject({ stable: true, ok: true, appended: 3, unchanged: 5 })
+    expect(result.message).toBe("prefix stable: all 5 blocks of the previous request are unchanged, and 3 blocks were appended")
+  })
+
+  test("transport fields and a string-vs-part rewrite are not changes", () => {
+    const stringInput = responses([{ type: "message", role: "user", content: "Fix the synthetic bug." }])
+    expect(explainPrefixDiff(turn1, { ...stringInput, stream: false, stream_options: { include_obfuscation: false } }).stable).toBe(true)
+  })
+
+  test("names reordered tools", () => {
+    const message = failure(turn1, responses(turn2.input, { tools: [...responsesTools].reverse() }))
+    expect(message).toContain("prefix not stable: tool order changed (2 of 3 tools moved; same tools, different order)")
+    expect(message).toContain('first changed block: 1 of 5 (tool "read_file", now tool "run_shell"); nothing before it matches')
+    expect(message).toContain("fix: build the tool list in a deterministic order")
+  })
+
+  test("names a timestamp in the system prompt", () => {
+    const at = (time: string) => `You are a synthetic coding agent. Current time: 2026-01-01 ${time}.`
+    const message = failure(responses(turn1.input, { instructions: at("10:41") }), responses(turn2.input, { instructions: at("10:42") }))
+    expect(message).toContain("system prompt changed: a timestamp value was updated (10:41 → 10:42)")
+    expect(message).toContain("first changed block: 4 of 5 (system part 1); blocks 1-3 still match")
+  })
+
+  test("names a rewritten tool output and an edited message", () => {
+    const truncated = responses([say("user", "Fix the synthetic bug."), call("c1"), output("c1", "print"), reply("Fixed.")])
+    expect(failure(turn2, truncated)).toContain("tool output in message #3 truncated after it was sent (8 → 5 chars)")
+    const edited = responses([say("user", "Fix the synthetic bug!"), ...turn2.input.slice(1)])
+    expect(failure(turn2, edited)).toContain("message #1 (user) was edited after it was sent")
+  })
+
+  test("names a tool list changed by a mode switch, and a parameter change", () => {
+    expect(failure(turn2, responses(turn2.input, { tools: responsesTools.slice(0, 1) }))).toContain("tool list changed (-2 tools: 3 → 1)")
+    const message = failure(turn2, responses(turn2.input, { reasoning: { effort: "high", summary: "auto" } }))
+    expect(message).toContain("request parameters changed: reasoning")
+    expect(message).toContain("+ reasoning.effort: high")
+  })
+
+  test("ignoreParams leaves a parameter out", () => {
+    const last = responses(turn2.input, { reasoning: { effort: "high", summary: "auto" } })
+    expect(explainPrefixDiff(turn2, last).ok).toBe(false)
+    expect(assertPrefixStable(turn2, last, { ignoreParams: ["reasoning"] }).stable).toBe(true)
+  })
+
+  test("allowBreak: a compaction may replace history", () => {
+    const compacted = responses([say("user", "Summary of the synthetic work so far.")])
+    expect(failure(turn2, compacted)).toContain('if this change is intentional, pass { allowBreak: { reason: "..." } }')
+    const allowed = assertPrefixStable(turn2, compacted, { allowBreak: "compaction" })
+    expect(allowed).toMatchObject({ stable: false, ok: true, allowed: "compaction" })
+    expect(allowed.message).toBe("prefix changed at block 5, allowed (compaction): history compacted (4 → 1 messages from message #1)")
+  })
+
+  test("allowBreak.after: tools and instructions must survive a compaction", () => {
+    const compactedWithNewTools = responses([say("user", "Summary.")], { tools: responsesTools.slice(0, 2) })
+    const message = failure(turn2, compactedWithNewTools, { allowBreak: { after: "system", reason: "compaction" } })
+    expect(message).toContain("a break was allowed (compaction) only after block 4 (the tools and system prompt must stay), and this one is earlier")
+    expect(assertPrefixStable(turn2, compactedWithNewTools, { allowBreak: { reason: "compaction" } }).ok).toBe(true)
+    expect(assertPrefixStable(turn2, responses([say("user", "Fix the synthetic bug."), reply("Rewound.")]), { allowBreak: { after: { message: 1 }, reason: "rewind" } }).ok).toBe(true)
+    expect(explainPrefixDiff(turn2, responses([say("user", "Rewound early.")]), { allowBreak: { after: { message: 1 } } }).ok).toBe(false)
+    expect(assertPrefixStable(turn2, responses(turn2.input.slice(0, 2)), { allowBreak: { after: 6 } }).ok).toBe(true)
+  })
+
+  test("a sliding history window is named, with the fix for it, on Responses and Chat Completions bodies too", () => {
+    const question = (n: number) => say("user", `Synthetic question ${n}.`)
+    const window = failure(responses([question(1), reply("One."), question(2), reply("Two."), question(3)]), responses([question(2), reply("Two."), question(3), reply("Three."), question(4)]))
+    expect(window).toStartWith("prefix not stable: 2 oldest messages removed from the start of history (3 kept, 2 appended)")
+    expect(window).toContain("first changed block: 5 of 9 (message #1, user); blocks 1-4 still match, everything from block 5 on is re-read")
+    expect(window).toContain("fix: a window that slides on every call re-reads the whole history each time: drop history in chunks at a saved boundary (cut rarely, and replay from the same cut until the next one), or keep history append-only.")
+    const chat = (messages: unknown[]) => ({ model: "gpt-test-1", messages: [{ role: "system", content: "Synthetic." }, ...messages] })
+    const slid = explainPrefixDiff(chat([user("One?"), assistant("One."), user("Two?")]), chat([assistant("One."), user("Two?"), assistant("Two.")]))
+    expect(slid.change?.summary).toBe("1 oldest message removed from the start of history (2 kept, 1 appended)")
+    // A deliberate cut can be declared; it must leave the tools and instructions alone.
+    expect(assertPrefixStable(chat([user("One?"), assistant("One."), user("Two?")]), chat([assistant("One."), user("Two?")]), { allowBreak: { after: "system", reason: "history trimmed" } }).ok).toBe(true)
+  })
+
+  test("item_reference items are compared by id, and the verdict says their content was not in the request", () => {
+    const reference = (id: string) => ({ type: "item_reference", id })
+    const first = responses([say("user", "Fix the synthetic bug."), reference("msg_synthetic_1")])
+    const second = responses([say("user", "Fix the synthetic bug."), reference("msg_synthetic_1"), reference("msg_synthetic_2"), say("user", "Go on.")])
+    const stable = assertPrefixStable(first, second)
+    expect(stable).toMatchObject({ stable: true, appended: 2, references: 1 })
+    expect(stable.message).toBe(
+      "prefix stable: all 6 blocks of the previous request are unchanged, and 2 blocks were appended; 1 of the unchanged blocks is an item_reference, compared by id only: the item it names was not in the request, so its content and size are unknown",
+    )
+    expect(assertPrefixStable(second, second).message).toEndWith("2 of the unchanged blocks are item_reference items, compared by id only: the items they name were not in the request, so their content and size are unknown")
+    // Without references the message is as it always was, and there is no count.
+    expect(assertPrefixStable(turn1, turn2)).not.toHaveProperty("references")
+    // Another id in the same place is a change, named for what it is.
+    const swapped = explainPrefixDiff(first, responses([say("user", "Fix the synthetic bug."), reference("msg_synthetic_9")]))
+    expect(swapped.stable).toBe(false)
+    expect(swapped.change?.summary).toBe("message #2 refers to another stored item (item_reference msg_synthetic_1 → msg_synthetic_9); references are compared by id only")
+  })
+
+  test("a model change fails unless the break may start anywhere", () => {
+    const other = responses(turn2.input, { model: "gpt-test-2" })
+    expect(failure(turn2, other)).toContain("the model changed, so nothing in the cache applies")
+    expect(assertPrefixStable(turn2, other, { allowBreak: { after: "start", reason: "model switch" } }).ok).toBe(true)
+  })
+
+  test("works on Anthropic and Chat Completions bodies, canonical requests and trace records", () => {
+    const a1 = body([user("Hi.")])
+    const a2 = body([user("Hi."), toolUse("t1", "read_file"), toolResult("t1", "data")])
+    expect(assertPrefixStable(a1, a2).appended).toBe(2)
+    expect(failure(a1, body(a2.messages, { tools: [...TOOLS, { name: "web_fetch", description: "x", input_schema: { type: "object" } }] }))).toContain("tool list changed (+1 tool: 3 → 4)")
+    const chat = (messages: unknown[]) => ({ model: "gpt-test-1", messages: [{ role: "system", content: "Synthetic." }, ...messages] })
+    expect(assertPrefixStable(chat([user("Hi.")]), chat([user("Hi."), assistant("Hello.")])).stable).toBe(true)
+    const canonical = canonicalizeRequest("anthropic", a1)
+    expect(assertPrefixStable(canonical, canonicalizeRequest("anthropic", a2)).stable).toBe(true)
+    const record = { v: 1, ts: "2026-01-01T10:00:00Z", provider: "anthropic", model: canonical.model, fidelity: "full-request" as const, request: { blocks: canonical.blocks }, usage: { input_tokens: 1, cache_read_tokens: 0, cache_write_tokens: 0, output_tokens: 1 } }
+    expect(assertPrefixStable(record, a2).stable).toBe(true)
+    expect(assertPrefixStable(canonical.blocks, canonicalizeRequest("anthropic", a2).blocks).stable).toBe(true)
+  })
+
+  test("Anthropic's request-level cache_control is a breakpoint that moves, not a parameter change", () => {
+    const marker = { type: "ephemeral" }
+    const first = body([user("Hi.")])
+    const second = body([user("Hi."), assistant("Hello."), user("Go on.")], { cache_control: marker })
+    // Turning it on, and moving from a marker on the last message to the request-level one, both keep the prefix.
+    expect(assertPrefixStable(first, second)).toMatchObject({ stable: true, appended: 2 })
+    const marked = body([{ role: "user", content: [{ type: "text", text: "Hi.", cache_control: marker }] }])
+    expect(assertPrefixStable(marked, second)).toMatchObject({ stable: true, appended: 2 })
+  })
+
+  test("a body without system or tools gets Anthropic's parameter rules when its model id is Claude's", () => {
+    const bare = (toolChoice: string, messages: unknown[]) => ({ model: "claude-test-1", max_tokens: 100, tool_choice: { type: toolChoice }, messages })
+    const result = explainPrefixDiff(bare("auto", [user("Hi.")]), bare("none", [user("Hi."), assistant("Hello.")]))
+    expect(result.change).toMatchObject({ cause: "params_changed", summary: "request parameters changed: tool_choice", detail: { from: "messages" } })
+  })
+
+  test("deferred tools are not prefix blocks: adding or removing one keeps the prefix, and they are not counted", () => {
+    const deferred = (name: string) => ({ name, description: `Synthetic deferred ${name}.`, input_schema: { type: "object" }, defer_loading: true })
+    const first = body([user("Hi.")], { tools: [TOOLS[0], deferred("search_docs"), TOOLS[1], TOOLS[2]] })
+    const second = body([user("Hi."), assistant("Hello.")], { tools: [...TOOLS, deferred("search_code")] })
+    expect(assertPrefixStable(first, second)).toMatchObject({ stable: true, appended: 1, unchanged: 5 })
+    // Block numbers count prefix blocks only: the edited system prompt is block 4 of 5, as without the deferred tool.
+    const edited = explainPrefixDiff(first, body([user("Hi.")], { tools: first.tools, system: "Changed." }))
+    expect(edited.block).toEqual({ number: 4, kind: "system", label: "system part 1" })
+    expect(edited.message).toContain("first changed block: 4 of 5 (system part 1)")
+  })
+
+  test("a Gemini body needs provider: gemini", () => {
+    const gemini = (contents: unknown[]) => ({ model: "gemini-test", systemInstruction: { parts: [{ text: "Synthetic." }] }, contents })
+    const hi = { role: "user", parts: [{ text: "Hi." }] }
+    expect(assertPrefixStable(gemini([hi]), gemini([hi, { role: "model", parts: [{ text: "Hello." }] }]), { provider: "gemini" }).appended).toBe(1)
+  })
+})
