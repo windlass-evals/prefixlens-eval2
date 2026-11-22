@@ -4,6 +4,10 @@ All notable changes to prefixlens are recorded here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- **`prefixlens compare <before> <after>`** compares two traces, for the run before a change to a harness and the run after it. It prints the change in model calls, prompt tokens, cache-read share and lost tokens, and `--json` prints the same figures for a benchmark: each has `before`, `after` and `change`, with `change_ratio` for all but the share (`null` when `before` is 0). It always exits 0; it is a comparison, not a gate (use `check` for that). It takes `--tolerance`, which sets what counts as lost. See [docs/report.md](https://github.com/parthg1901/prefixlens/blob/main/docs/report.md#comparing-two-traces).
+
 ## [0.7.0] - 2026-11-18
 
 ### Added

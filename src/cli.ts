@@ -15,6 +15,7 @@ import { cataloguePath, loadCatalogue, parseProviderMapping } from "./catalogue.
 import { loadPricing } from "./pricing.ts"
 import { printable } from "./printable.ts"
 import { renderCheck, renderCheckJson } from "./report/check.ts"
+import { compare, renderCompare, renderCompareJson } from "./report/compare.ts"
 import { renderHtml } from "./report/html.ts"
 import { renderJson } from "./report/json.ts"
 import { renderTerminal } from "./report/terminal.ts"
@@ -27,6 +28,8 @@ const HELP = `prefixlens ${VERSION}: explains prompt-cache hits and misses
 Usage:
   prefixlens import <adapter> <path> [options]   convert harness logs to a trace (JSONL)
   prefixlens report <trace.jsonl|-> [options]    report hit rates, costs and miss causes
+  prefixlens compare <before> <after> [options]  change in calls, prompt tokens, cache-read share and lost
+                                                 tokens between two traces
   prefixlens check <trace.jsonl|-> [options]     exit 1 when the harness broke its own cache (for CI)
   prefixlens check --requests <file|-> [options] exit 1 when a request body does not keep the prefix
                                                  of the one before it (bodies your tests captured)
@@ -65,6 +68,11 @@ report options:
   --all                 show every row and every miss in the terminal report
   --no-color            plain terminal output (also honours NO_COLOR)
 
+compare options:
+  --json                print the comparison as JSON
+  --tolerance <tokens>, --pricing, --no-catalogue, --catalogue-provider   as for report
+                        (at most one of the two traces may be - for stdin)
+
 check options:
   --fail-on <classes>   also fail on these, comma-separated: unexplained, intentional, expiry,
                         provider-side, cold-start, warm-start (default: avoidable misses and
@@ -101,6 +109,7 @@ Examples:
   prefixlens import claude-code ~/.claude/projects/-my-project/<session-id>.jsonl -o session.trace.jsonl
   prefixlens import opencode ~/.local/share/opencode/opencode.db --list
   prefixlens report session.trace.jsonl --html
+  prefixlens compare before.trace.jsonl after.trace.jsonl --json   # what a harness change did to the cache
   prefixlens check run.trace.jsonl --fail-on expiry           # in CI, after a recorded run
   prefixlens check --requests bodies.jsonl --allow-break-at 7=compaction   # bodies a test wrote
   prefixlens record --provider anthropic -o run.trace.jsonl   # then ANTHROPIC_BASE_URL=http://127.0.0.1:8787
@@ -132,6 +141,7 @@ export async function main(argv: string[]): Promise<number> {
   if (command === "adapters") return listAdapters()
   if (command === "import") return runImport(positionals.slice(1), flags)
   if (command === "report") return runReport(positionals.slice(1), flags)
+  if (command === "compare") return runCompare(positionals.slice(1), flags)
   if (command === "check") return runCheck(positionals.slice(1), flags)
   if (command === "record") return runRecord(flags)
   if (command === "pricing") {
@@ -255,6 +265,21 @@ async function runReport(args: string[], flags: Flags): Promise<number> {
         pricingNote,
       }),
     )
+  return 0
+}
+
+// Two traces, one analysis each, and the change between them. Not a gate: exit 0 whatever the change.
+async function runCompare(args: string[], flags: Flags): Promise<number> {
+  const [before, after, ...extra] = args
+  if (!before || !after || extra.length > 0) return fail("usage: prefixlens compare <before.trace.jsonl> <after.trace.jsonl> [--json]")
+  if (before === "-" && after === "-") return fail("only one trace can be read from stdin")
+  const first = await loadAnalysis(before, flags)
+  if (typeof first === "string") return fail(`before: ${first}`)
+  const second = await loadAnalysis(after, flags)
+  if (typeof second === "string") return fail(`after: ${second}`)
+  const names = { before: before === "-" ? "stdin" : before, after: after === "-" ? "stdin" : after }
+  const comparison = compare(first.analysis, second.analysis)
+  process.stdout.write(flags.json ? renderCompareJson(comparison, names) : renderCompare(comparison, names))
   return 0
 }
 
