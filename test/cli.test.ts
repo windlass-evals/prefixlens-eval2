@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -196,5 +196,53 @@ describe("cli record", () => {
 
   test("record needs a provider", () => {
     expect(run(["record"]).stderr).toContain("record needs --provider anthropic or --provider openai")
+  })
+
+  describe("compare", () => {
+    const agent = path.join(fixtures, "agent-session.jsonl")
+    const other = () => {
+      const trace = path.join(temp, "compare-other.trace.jsonl")
+      run(["import", "claude-code", path.join(fixtures, "claude-code-session.jsonl"), "-o", trace])
+      return trace
+    }
+
+    test("prints the change in calls, prompt tokens, cache-read share and lost tokens", () => {
+      const result = run(["compare", agent, other()])
+      expect(result.code).toBe(0)
+      expect(result.stdout).toContain("model calls             5      5          0")
+      expect(result.stdout).toContain("prompt tokens     246,030  9,463   -236,567  -96%")
+      expect(result.stdout).toContain("cache-read share    59.6%  37.0%  -22.6 pts")
+      expect(result.stdout).toContain("lost tokens        49,000  2,100    -46,900  -96%")
+    })
+
+    test("--json is the same figures as data", () => {
+      const parsed = JSON.parse(run(["compare", agent, other(), "--json"]).stdout)
+      expect(parsed.compare).toBe("prefixlens")
+      expect(parsed.traces.before).toBe(agent)
+      expect(parsed.calls).toMatchObject({ before: 5, after: 5, change: 0 })
+      expect(parsed.prompt_tokens).toMatchObject({ before: 246030, after: 9463, change: -236567 })
+      expect(parsed.hit_rate.change).toBeCloseTo(0.37 - 0.59635, 3)
+      expect(parsed.lost_tokens).toMatchObject({ before: 49000, after: 2100, change: -46900 })
+    })
+
+    test("a trace against itself changes nothing, and a ratio against zero is null", () => {
+      const same = JSON.parse(run(["compare", agent, agent, "--json"]).stdout)
+      expect(same.lost_tokens.change).toBe(0)
+      expect(same.hit_rate.change).toBe(0)
+      const clean = path.join(temp, "clean.trace.jsonl")
+      const lines = readFileSync(agent, "utf8").trim().split("\n")
+      // The first call of a lane loses nothing, so a one-call trace has no lost tokens.
+      writeFileSync(clean, lines[0] + "\n")
+      expect(JSON.parse(run(["compare", clean, agent, "--json"]).stdout).lost_tokens.change_ratio).toBeNull()
+    })
+
+    test("needs two traces, reads at most one from stdin, and names the unreadable one", () => {
+      expect(run(["compare", agent]).code).toBe(1)
+      expect(run(["compare", "-", "-"], "").stderr).toContain("only one trace can be read from stdin")
+      const missing = run(["compare", agent, path.join(temp, "missing.jsonl")])
+      expect(missing.code).toBe(1)
+      expect(missing.stderr).toContain("after: cannot read")
+      expect(run(["compare", "-", agent], readFileSync(agent, "utf8")).code).toBe(0)
+    })
   })
 })

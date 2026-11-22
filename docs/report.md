@@ -47,6 +47,45 @@ Notes follow the headline: how costs are priced, where the prices came from, and
 
 Long sessions hide the hit rows in the terminal; `--all` shows them. The HTML report always has every row, a chart of prompt tokens per call, and the diff for each miss.
 
+## Comparing two traces
+
+`prefixlens compare <before> <after>` reads two traces, usually the same task run before and after a change to a harness, and prints how the cache figures moved:
+
+```
+$ prefixlens compare before.trace.jsonl after.trace.jsonl
+prefixlens compare
+  before: before.trace.jsonl
+  after:  after.trace.jsonl
+
+                   before    after   change
+model calls            40       38       -2  -5.0%
+prompt tokens   1,204,000  980,000  -224,000  -19%
+cache-read share    71.2%    93.5%  +22.3 pts
+lost tokens       310,000   12,000  -298,000  -96%
+```
+
+- **model calls**: calls in the trace, across all lanes.
+- **prompt tokens**: summed over every call, whether read from the cache, written to it or uncached.
+- **cache-read share**: prompt tokens read from the cache, over all prompt tokens. The change is in percentage points.
+- **lost tokens**: tokens that the call before in the same lane had left cached and that a call did not read, summed over every call. Declared intentional breaks are included. `--tolerance` sets how small a loss is counted as none.
+
+`--json` prints the same figures as data, for a benchmark:
+
+```json
+{
+  "compare": "prefixlens",
+  "traces": { "before": "before.trace.jsonl", "after": "after.trace.jsonl" },
+  "calls": { "before": 40, "after": 38, "change": -2, "change_ratio": -0.05 },
+  "prompt_tokens": { "before": 1204000, "after": 980000, "change": -224000, "change_ratio": -0.186 },
+  "hit_rate": { "before": 0.712, "after": 0.935, "change": 0.223 },
+  "lost_tokens": { "before": 310000, "after": 12000, "change": -298000, "change_ratio": -0.961 }
+}
+```
+
+`change` is `after - before`; for `hit_rate` it is a difference of shares, so `0.223` is 22.3 points. `change_ratio` is `change / before`, or `null` when `before` is 0, and `hit_rate` has none. Like the rest of the JSON report, these fields may change in a minor version before 1.0.
+
+The command exits 0 whatever the change, and 1 when a trace cannot be read. At most one of the two can be `-` (stdin). It takes `--tolerance`, `--pricing`, `--no-catalogue` and `--catalogue-provider` as `report` does. To fail a build on a regression, use [`check`](check.md).
+
 ## Options
 
 | option | meaning |
