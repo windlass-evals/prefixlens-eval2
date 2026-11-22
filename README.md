@@ -105,6 +105,8 @@ npx prefixlens report run.trace.jsonl          # add --html for a self-contained
 npx prefixlens check run.trace.jsonl           # the CI step: exits 1 when your harness broke its own cache
 ```
 
+Comparing a harness change? Run `npx prefixlens compare before.trace.jsonl after.trace.jsonl` for changes in call count, prompt tokens, cache-read share and lost tokens. Add `--json` for benchmarks. See [comparing traces](https://github.com/parthg1901/prefixlens/blob/main/docs/report.md#compare-two-traces).
+
 Credentials are forwarded and never written. More in [proxy](https://github.com/parthg1901/prefixlens/blob/main/docs/proxy.md) and [check](https://github.com/parthg1901/prefixlens/blob/main/docs/check.md).
 
 ### 3. Wrap your client

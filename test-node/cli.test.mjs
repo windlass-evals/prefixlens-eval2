@@ -46,6 +46,17 @@ test("import with each adapter, then report in the terminal, as JSON and as HTML
   assert.match(run(["report", "-"], { input: piped.stdout }).stdout, /8 model calls/)
 })
 
+test("compare writes zero deltas when given the same trace twice", () => {
+  const trace = path.join(fixtures, "agent-session.jsonl")
+  const result = run(["compare", trace, trace, "--json"])
+  assert.equal(result.code, 0, result.stderr)
+  const json = JSON.parse(result.stdout)
+  assert.deepEqual(json.before, json.after)
+  assert.equal(json.before.calls, 5)
+  assert.equal(json.before.lost_tokens, 49000)
+  assert.deepEqual(json.delta, { calls: 0, prompt_tokens: 0, cache_read_share_pp: 0, lost_tokens: 0 })
+})
+
 test("the SPEC example reports the tool-list miss", () => {
   const example = readFileSync(SPEC_TRACE, "utf8").match(/## 9\. Example[\s\S]*?```jsonl\n([\s\S]*?)```/)[1]
   const report = run(["report", "-"], { input: example })

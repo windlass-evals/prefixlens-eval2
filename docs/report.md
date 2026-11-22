@@ -11,6 +11,26 @@ prefixlens import otel spans.json | prefixlens report -    # "-" reads the trace
 
 For a pass or a fail in CI, `prefixlens check <trace.jsonl>` reads the same analysis and exits 1 when the harness broke its own cache: see [check.md](check.md).
 
+## Compare two traces
+
+Run the same workload before and after a harness change, then compare the recorded runs:
+
+```sh
+prefixlens compare before.trace.jsonl after.trace.jsonl
+prefixlens compare before.trace.jsonl after.trace.jsonl --json > comparison.json
+```
+
+The terminal table shows both totals and their signed change (**after minus before**):
+
+- **Calls**: model calls in the trace.
+- **Prompt tokens**: total input, cache reads and cache writes.
+- **Cache-read share**: total cache-read tokens divided by total prompt tokens (0 when there are no prompt tokens), not an average of per-call rates. The change is in percentage points (`pp`).
+- **Lost tokens**: the sum of the report's per-call `lost_tokens`, including intentional breaks and small losses still counted as hits. Each trace is analyzed separately, so no call is compared with a call in the other trace.
+
+`--json` writes one object with `compare: "prefixlens"`, `version: 1`, `before`, `after` and `delta`. Each side has `trace` (the path as given), `calls`, `prompt_tokens`, `cache_read_share` (a fraction from 0 to 1) and `lost_tokens`. `delta` has the same numeric fields except `cache_read_share_pp` replaces `cache_read_share`: for example, a rise from 0.4 to 0.5 is roughly `10` percentage points. Unlike the terminal display, JSON values aren't rounded for display.
+
+Either input, but not both, can be `-` to read from stdin. `--pricing`, `--no-catalogue` and `--catalogue-provider` apply to both traces as in `report`. As with `report`, invalid lines are diagnosed on stderr and skipped if there are still valid records. The command exits 0 for a completed comparison, even when caching got worse, and 1 if it can't compare the inputs.
+
 ## The terminal report
 
 ```
